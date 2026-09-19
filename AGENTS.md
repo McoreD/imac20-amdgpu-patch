@@ -20,7 +20,7 @@ working `amdgpu.ko.zst` for an Apple iMac20,1 / iMac20,2 running
 |---|---|---|
 | `src/6001-drm-amd-pm-Fix-boot-problems-in-5300.patch` | Verbatim upstream patch. Do not edit. | **No** — refresh from upstream if it changes |
 | `scripts/build-amdgpu.sh` | Rebuild only `amdgpu.ko` from a source tree. Idempotent, no install. | Yes, but keep it standalone (no `sudo`) |
-| `scripts/build-amdgpu-install.sh` | Rebuild + backup stock + install + `depmod -a` + `limine-mkinitcpio`. Uses `pkexec` once for `install` and `mkinitcpio`. | Yes |
+| `scripts/build-amdgpu-install.sh` | Rebuild + backup stock + install + `depmod -a` + `limine-mkinitcpio`. Run with `sudo`. Backs up the stock module **before** rebuilding so the backup is always the unpatched version. | Yes |
 | `scripts/repatch-amdgpu.sh` | Invoked by the pacman hook after `pacman -Syu linux-t2`. Re-runs the build if the magic constants are missing from the installed module. | Yes |
 | `scripts/install-pacman-hook.sh` | Writes `/etc/pacman.d/hooks/zz-repatch-amdgpu.hook` and copies `repatch-amdgpu.sh` into `/usr/local/sbin/`. | Yes |
 | `scripts/install-limine-hwaccel-entry.sh` | Writes `/etc/limine-entry-tool.d/imac20-hwaccel.conf` and runs `limine-mkinitcpio`. The safe entry stays the default. | Yes |

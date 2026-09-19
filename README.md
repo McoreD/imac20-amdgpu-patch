@@ -116,7 +116,7 @@ sudo limine-mkinitcpio
 ## Roll back
 
 The stock module is preserved at `/usr/lib/amdgpu-stock-backup/amdgpu.ko.zst`.
-To revert in seconds:
+To revert in under 30 seconds:
 
 ```bash
 sudo cp /usr/lib/amdgpu-stock-backup/amdgpu.ko.zst \
