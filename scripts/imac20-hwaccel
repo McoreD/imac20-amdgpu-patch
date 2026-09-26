@@ -11,6 +11,9 @@
 #                       installed linux-t2), then rebuild both UKIs
 #   rebuild-uki         rebuild the safe and hwaccel UKIs for the installed kernel
 #   disable             remove the hwaccel boot entry (safe entry only)
+#   ab-test / ab-result / ab-clean
+#                       add a non-default entry that boots the HWA flags with the
+#                       linux-t2 PACKAGE amdgpu, report which module booted, remove it
 #   hook                pacman PostTransaction entry point (never fails the transaction)
 #
 # If hwaccel ever breaks (black panel after a kernel upgrade, etc.): pick the
@@ -169,6 +172,69 @@ rebuild_ukis() {
   log "UKIs rebuilt; default boot = hwaccel, 'Omarchy' entry = safe"
 }
 
+# A/B test: does the linux-t2 package's own amdgpu work with the HWA flags?
+# Builds an extra entry from the hwaccel UKI with the package module overlaid
+# via an appended cpio (later initramfs archives overwrite earlier files).
+# Touches nothing but a new EFI file and its Limine entry.
+AB_UKI=$UKI_DIR/omarchy_linux-t2-hwaccel-stock.efi
+AB_NAME=imac20-hwaccel-stock
+ab_test() {
+  local krel pkgver pkg work
+  krel=$(target_krel)
+  pkgver=$(pacman -Q linux-t2 | cut -d' ' -f2)
+  pkg=/var/cache/pacman/pkg/linux-t2-$pkgver-x86_64.pkg.tar.zst
+  [[ -f $pkg ]] || die "package $pkg not in cache (pacman -Sw linux-t2)"
+  [[ -f $HWA_UKI ]] || die "no hwaccel UKI; run repatch first"
+  [[ "$(uname -r)" == "$krel" ]] || die "reboot into $krel first"
+
+  work=$(mktemp -d); trap 'rm -rf "${work:?}"' RETURN
+  mkdir -p "$work/root/usr/lib/modules/$krel/updates"
+  bsdtar -xOf "$pkg" "usr/lib/modules/$krel/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst" \
+    > "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst"
+  [[ "$(modinfo -F vermagic "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst")" == "$krel "* ]] \
+    || die "package module vermagic mismatch"
+
+  objcopy -O binary --only-section=.initrd "$HWA_UKI" "$work/initrd"
+  (cd "$work/root" && find usr | LC_ALL=C sort | bsdcpio -o --format newc --quiet) >> "$work/initrd"
+  # --update-section silently truncates a grown PE section; remove + re-add at
+  # the same VMA instead (objcopy then grows SizeOfImage), and verify both.
+  local vma base soi
+  vma=0x$(objdump -h "$HWA_UKI" | awk '$2==".initrd"{print $4}')
+  objcopy --remove-section .initrd --add-section .initrd="$work/initrd" \
+    --change-section-vma .initrd="$vma" --set-section-flags .initrd=contents,alloc,load,readonly,data \
+    "$HWA_UKI" "$work/test.efi"
+  base=0x$(objdump -p "$work/test.efi" | awk '$1=="ImageBase"{print $2}')
+  soi=0x$(objdump -p "$work/test.efi" | awk '$1=="SizeOfImage"{print $2}')
+  (( vma - base + $(stat -c %s "$work/initrd") <= soi )) || die "SizeOfImage does not cover the grown .initrd"
+  # The extracted section is padded to the PE file alignment; compare the payload only.
+  cmp -s -n "$(stat -c %s "$work/initrd")" <(objcopy -O binary --only-section=.initrd "$work/test.efi" /dev/stdout) "$work/initrd" \
+    || die "rebuilt UKI initrd mismatch"
+  install -m755 "$work/test.efi" "$AB_UKI"
+  limine-entry-tool --add-efi "$AB_NAME" "$AB_UKI" --overwrite \
+    --comment "A/B TEST: hwaccel flags + linux-t2 package amdgpu ($pkgver). Not default." >/dev/null
+  log "test entry '$AB_NAME' added (default unchanged). Boot it once, then run: imac20-hwaccel ab-result"
+}
+
+ab_result() {
+  local tainted
+  tainted=$(journalctl -k -b --no-pager | grep -c 'amdgpu: module verification failed' || true)
+  echo "cmdline:      $(grep -oE 'amdgpu.modeset=1|nomodeset' /proc/cmdline)"
+  echo "boot image:   $(bootctl status 2>/dev/null | sed -n 's/.*Stub: .*\///p' | head -1)"
+  echo "amdgpu:       $( ((tainted)) && echo 'REBUILT (unsigned/out-of-tree taint)' || echo 'package module (no taint)')"
+  local pkg live pkgsrc
+  pkg=/var/cache/pacman/pkg/linux-t2-$(pacman -Q linux-t2 | cut -d' ' -f2)-x86_64.pkg.tar.zst
+  live=$(cat /sys/module/amdgpu/srcversion 2>/dev/null || echo 'not loaded')
+  pkgsrc=$(t=$(mktemp --suffix=.ko.zst) && bsdtar -xOf "$pkg" "usr/lib/modules/$(uname -r)/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst" > "$t" 2>/dev/null \
+    && modinfo -F srcversion "$t"; rm -f "$t")
+  echo "srcversion:   live=$live package=${pkgsrc:-?} $([[ $live == "$pkgsrc" ]] && echo '=> PACKAGE module' || echo '=> not the package module')"
+  journalctl -k -b --no-pager | grep -E 'SMU is initialized|smu.*failed|failed -62|Initialized amdgpu' || echo "no amdgpu init lines"
+}
+
+ab_clean() {
+  limine-entry-tool --remove-efi-path "$AB_UKI" >/dev/null 2>&1 || rm -f "$AB_UKI"
+  log "A/B test entry removed"
+}
+
 disable_hwaccel() {
   limine-entry-tool --remove-efi-path "$HWA_UKI" >/dev/null 2>&1 || rm -f "$HWA_UKI"
   sed -i 's|^default_entry:.*|#default_entry: <OS name>/<kernel name>|' "$LIMINE_CONF"
@@ -205,6 +271,9 @@ case $cmd in
   repatch)     require_root "$@"; k=${2:-$(target_krel)}; build_module "$k"; rebuild_ukis "$k" ;;
   rebuild-uki) require_root "$@"; rebuild_ukis "$(target_krel)" ;;
   disable)     require_root "$@"; disable_hwaccel manual ;;
+  ab-test)     require_root "$@"; ab_test ;;
+  ab-result)   require_root "$@"; ab_result ;;
+  ab-clean)    require_root "$@"; ab_clean ;;
   _hookwork)   k=$(target_krel); module_is_patched "$k" || build_module "$k"; rebuild_ukis "$k" ;;
   hook)
     # Run the work in a child so `set -e` stays active (it is suppressed
