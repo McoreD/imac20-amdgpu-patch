@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# imac20-hwaccel — two-path boot for an iMac20,1 / iMac20,2 (Navi 14, T2).
+#
+#   Limine "Omarchy > linux-t2" (+ snapshots)  SAFE:  nomodeset modprobe.blacklist=amdgpu
+#   Limine "imac20-hwaccel" (default)          HWA:   amdgpu.modeset=1 video=efifb:off
+#                                                     + patched amdgpu (t2linux 6001 SMU fix)
+#
+# Commands (run with sudo):
+#   status              show boot mode, patch state per kernel, UKIs and entries
+#   repatch [KREL]      build + install the patched amdgpu for KREL (default: newest
+#                       installed linux-t2), then rebuild both UKIs
+#   rebuild-uki         rebuild the safe and hwaccel UKIs for the installed kernel
+#   disable             remove the hwaccel boot entry (safe entry only)
+#   hook                pacman PostTransaction entry point (never fails the transaction)
+#
+# If hwaccel ever breaks (black panel after a kernel upgrade, etc.): pick the
+# "Omarchy" entry in Limine, log in, run `sudo imac20-hwaccel repatch`, reboot.
+set -euo pipefail
+shopt -s nullglob
+
+CONF=/etc/imac20-hwaccel.conf
+BUILD_USER=mike
+BUILD_ROOT=/home/mike/build
+[[ -f $CONF ]] && source "$CONF"
+
+SHARE=/usr/local/share/imac20-hwaccel
+PATCH_FILE=$SHARE/6001-drm-amd-pm-Fix-boot-problems-in-5300.patch
+STATE_DIR=/var/lib/imac20-hwaccel
+GPU_DROPIN=/etc/limine-entry-tool.d/imac20-gpu-mode.conf
+LIMINE_CONF=/boot/limine.conf
+UKI_DIR=/boot/EFI/Linux
+DEFAULT_UKI=$UKI_DIR/omarchy_linux-t2.efi
+HWA_UKI=$UKI_DIR/omarchy_linux-t2-hwaccel.efi
+ENTRY_NAME=imac20-hwaccel
+ENTRY_ID=default-imac20-hwaccel
+SAFE_FLAGS="nomodeset modprobe.blacklist=amdgpu"
+HWA_FLAGS="amdgpu.modeset=1 video=efifb:off"
+
+log()  { echo "imac20-hwaccel: $*"; }
+die()  { echo "imac20-hwaccel: ERROR: $*" >&2; exit 1; }
+as_builder() { runuser -u "$BUILD_USER" -- "$@"; }
+
+require_root() {
+  [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+}
+
+# Newest installed linux-t2 kernel release (NOT uname -r: in a pacman hook the
+# running kernel is the old one).
+target_krel() {
+  local d best=""
+  for d in /usr/lib/modules/*/; do
+    [[ -f $d/vmlinuz && "$(cat "$d/pkgbase" 2>/dev/null)" == linux-t2 ]] || continue
+    best+="$(basename "$d")"$'\n'
+  done
+  printf '%s' "$best" | sort -V | tail -1
+}
+
+uki_cmdline() { objcopy -O binary --only-section=.cmdline "$1" /dev/stdout 2>/dev/null | tr -d '\0'; }
+
+has_magic() { # <amdgpu.ko[.zst|.xz]>
+  python3 - "$1" <<'PY'
+import sys, subprocess
+p = sys.argv[1]
+if p.endswith('.zst'):   d = subprocess.run(['zstd', '-dcq', p], capture_output=True, check=True).stdout
+elif p.endswith('.xz'):  d = subprocess.run(['xz', '-dc', p], capture_output=True, check=True).stdout
+else:                    d = open(p, 'rb').read()
+sys.exit(0 if bytes.fromhex('bbafc9ab') in d and bytes.fromhex('42fdffff') in d else 1)
+PY
+}
+
+module_path() { modinfo -k "$1" -n amdgpu 2>/dev/null || true; }
+module_is_patched() { local m; m=$(module_path "$1"); [[ -n $m ]] && has_magic "$m"; }
+
+build_module() { # <krel>
+  local krel=$1 base localver tarver major src out
+  base=${krel%%-*}
+  localver=${krel#"$base"}
+  tarver=$base; [[ $base == *.*.0 ]] && tarver=${base%.0}
+  major=${base%%.*}
+  src=$BUILD_ROOT/linux-$tarver
+  out=$BUILD_ROOT/amdgpu-$krel.ko.zst
+
+  [[ -f $PATCH_FILE ]] || die "patch missing: $PATCH_FILE"
+  [[ -f /usr/lib/modules/$krel/build/.config ]] || die "linux-t2-headers for $krel not installed"
+
+  if [[ ! -f $src/Makefile ]]; then
+    log "fetching linux-$tarver source from kernel.org"
+    as_builder mkdir -p "$BUILD_ROOT"
+    as_builder curl -fL --retry 3 -o "$BUILD_ROOT/linux-$tarver.tar.xz" \
+      "https://cdn.kernel.org/pub/linux/kernel/v$major.x/linux-$tarver.tar.xz"
+    as_builder tar -C "$BUILD_ROOT" -xf "$BUILD_ROOT/linux-$tarver.tar.xz"
+  fi
+
+  log "building patched amdgpu for $krel in $src"
+  # Older versions of this tooling built as root; take the tree back.
+  find "$src" ! -user "$BUILD_USER" -exec chown "$BUILD_USER": {} +
+  as_builder bash -euo pipefail -c '
+    cd "$1"; krel=$2; localver=$3; patchf=$4; out=$5
+    if patch -p1 -R --dry-run -s -f < "$patchf" >/dev/null 2>&1; then
+      echo "  6001 patch already applied"
+    elif patch -p1 --dry-run -s -f < "$patchf" >/dev/null 2>&1; then
+      echo "  applying 6001 patch"; patch -p1 -s < "$patchf"
+    else
+      echo "  6001 patch does not apply to this kernel source" >&2; exit 3
+    fi
+    cp "/usr/lib/modules/$krel/build/.config" .config
+    cp "/usr/lib/modules/$krel/build/Module.symvers" Module.symvers
+    scripts/config --set-str LOCALVERSION "$localver" --disable LOCALVERSION_AUTO
+    rm -f localversion* .version include/config/kernel.release
+    make -s olddefconfig
+    make -s -j"$(nproc)" modules_prepare
+    got=$(make -s kernelrelease)
+    [[ $got == "$krel" ]] || { echo "  kernelrelease $got != $krel" >&2; exit 4; }
+    rm -f drivers/gpu/drm/amd/amdgpu/amdgpu.ko
+    make -s -j"$(nproc)" M=drivers/gpu/drm/amd/amdgpu modules
+    strip --strip-debug drivers/gpu/drm/amd/amdgpu/amdgpu.ko
+    zstd -T0 -q -f -o "$out" drivers/gpu/drm/amd/amdgpu/amdgpu.ko
+  ' _ "$src" "$krel" "$localver" "$PATCH_FILE" "$out"
+
+  local vm
+  vm=$(modinfo -F vermagic "$out")
+  [[ $vm == "$krel "* ]] || die "vermagic mismatch: '$vm' vs $krel"
+  has_magic "$out" || die "6001 magic constants missing from built module"
+
+  # updates/ wins over kernel/ (depmod search order) and is not owned by the
+  # linux-t2 package, so pacman never flags or silently replaces it.
+  install -Dm644 "$out" "/usr/lib/modules/$krel/updates/amdgpu.ko.zst"
+  depmod -a "$krel"
+  module_is_patched "$krel" || die "depmod does not resolve amdgpu to the patched module"
+  log "patched amdgpu installed: $(module_path "$krel")"
+}
+
+write_dropin() { # safe|hwaccel
+  local flags=$SAFE_FLAGS
+  [[ $1 == hwaccel ]] && flags=$HWA_FLAGS
+  cat > "$GPU_DROPIN" <<EOF
+# Managed by imac20-hwaccel — do not edit. [default] = SAFE boot path (no amdgpu).
+# The hwaccel UKI is built by temporarily swapping this to: $HWA_FLAGS
+KERNEL_CMDLINE[default]+=" $flags"
+EOF
+}
+
+rebuild_ukis() {
+  local krel=$1
+  module_is_patched "$krel" || die "amdgpu for $krel is not patched; run: imac20-hwaccel repatch"
+  mkdir -p "$STATE_DIR"
+
+  trap 'write_dropin safe' EXIT
+  log "building hwaccel UKI"
+  write_dropin hwaccel
+  limine-mkinitcpio >/dev/null
+  uki_cmdline "$DEFAULT_UKI" | grep -q 'amdgpu.modeset=1' || die "hwaccel cmdline not in built UKI"
+  cp "$DEFAULT_UKI" "$HWA_UKI.new" && mv "$HWA_UKI.new" "$HWA_UKI"
+
+  log "building safe UKI"
+  write_dropin safe
+  trap - EXIT
+  limine-mkinitcpio >/dev/null
+  uki_cmdline "$DEFAULT_UKI" | grep -q 'nomodeset' || die "safe cmdline not in default UKI"
+
+  limine-entry-tool --add-efi "$ENTRY_NAME" "$HWA_UKI" --overwrite \
+    --comment "Hardware acceleration (patched amdgpu, $krel). Black screen? Boot 'Omarchy' = safe mode." >/dev/null
+  if grep -q '^#\?default_entry:' "$LIMINE_CONF"; then
+    sed -i "s|^#\?default_entry:.*|default_entry: $ENTRY_ID|" "$LIMINE_CONF"
+  else
+    sed -i "0,/^### Read more/s||&\ndefault_entry: $ENTRY_ID|" "$LIMINE_CONF"
+  fi
+  echo "ok $krel $(date -Is)" > "$STATE_DIR/status"
+  log "UKIs rebuilt; default boot = hwaccel, 'Omarchy' entry = safe"
+}
+
+disable_hwaccel() {
+  limine-entry-tool --remove-efi-path "$HWA_UKI" >/dev/null 2>&1 || rm -f "$HWA_UKI"
+  sed -i 's|^default_entry:.*|#default_entry: <OS name>/<kernel name>|' "$LIMINE_CONF"
+  mkdir -p "$STATE_DIR"
+  echo "disabled $(date -Is) ${1:-manual}" > "$STATE_DIR/status"
+  log "hwaccel entry removed; only the safe entry remains"
+}
+
+status() {
+  local krel k
+  krel=$(target_krel)
+  echo "running:     $(uname -r)"
+  if grep -q 'amdgpu.modeset=1' /proc/cmdline; then echo "boot mode:   HWACCEL"
+  elif grep -q nomodeset /proc/cmdline; then echo "boot mode:   SAFE"
+  else echo "boot mode:   unknown ($(cat /proc/cmdline))"; fi
+  echo "renderer:    $(ls /dev/dri/ 2>/dev/null | tr '\n' ' ')"
+  for k in /usr/lib/modules/*/; do
+    k=$(basename "$k")
+    [[ -f /usr/lib/modules/$k/vmlinuz ]] || continue
+    printf 'amdgpu %-34s %s  %s\n' "$k" "$(module_is_patched "$k" && echo PATCHED || echo stock)" "$(module_path "$k")"
+  done
+  echo "target krel: $krel"
+  for u in "$DEFAULT_UKI" "$HWA_UKI"; do
+    [[ -f $u ]] && echo "UKI $(basename "$u"): $(uki_cmdline "$u" | grep -oE 'nomodeset|amdgpu.modeset=1' | head -1) ($(stat -c %y "$u" | cut -c1-16))" \
+                || echo "UKI $(basename "$u"): missing"
+  done
+  echo "default:     $(grep -m1 '^default_entry' "$LIMINE_CONF" 2>/dev/null || echo 'first entry')"
+  echo "last result: $(cat "$STATE_DIR/status" 2>/dev/null || echo none)"
+}
+
+cmd=${1:-status}
+case $cmd in
+  status)      require_root "$@"; status ;;
+  repatch)     require_root "$@"; k=${2:-$(target_krel)}; build_module "$k"; rebuild_ukis "$k" ;;
+  rebuild-uki) require_root "$@"; rebuild_ukis "$(target_krel)" ;;
+  disable)     require_root "$@"; disable_hwaccel manual ;;
+  _hookwork)   k=$(target_krel); module_is_patched "$k" || build_module "$k"; rebuild_ukis "$k" ;;
+  hook)
+    # Run the work in a child so `set -e` stays active (it is suppressed
+    # inside an `if` condition), and never fail the pacman transaction.
+    k=$(target_krel)
+    if "$0" _hookwork; then
+      log "hwaccel ready for $k"
+    else
+      disable_hwaccel "patch-failed-$k"
+      cat <<EOF
+
+  ==================================================================
+  imac20-hwaccel: could NOT re-apply the amdgpu patch for $k.
+  The hardware-acceleration boot entry has been REMOVED; the next boot
+  uses the safe entry (no amdgpu). To retry: sudo imac20-hwaccel repatch
+  ==================================================================
+
+EOF
+    fi
+    exit 0 ;;
+  *) sed -n '2,20p' "$0"; exit 1 ;;
+esac
