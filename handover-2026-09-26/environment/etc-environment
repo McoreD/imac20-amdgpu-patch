@@ -1,0 +1,10 @@
+# iMac20,1 hwaccel workaround (2026-09-26):
+# libhyprgraphics 0.5.1-4 deadlocks in CAsyncResourceGatherer::asyncAssetSpinLock
+# when amdgpu KMS is active. llvmpipe forces software rendering and bypasses
+# the broken code path. Affects both sddm-greeter and user Hyprland.
+#
+# When upstream libhyprgraphics is fixed (or downgraded), remove these lines.
+LIBGL_ALWAYS_SOFTWARE=1
+MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

@@ -1,0 +1,13 @@
+ESP_PATH="/boot"
+
+KERNEL_CMDLINE[default]+="cryptdevice=PARTUUID=6b0beffb-7601-44c9-abff-295b7ddb40a4:root root=/dev/mapper/root zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs"
+
+KERNEL_CMDLINE[default]+=" plymouth.enable=0 "
+
+# Added 2026-09-26: HW-accel flags applied to [default] so any boot entry
+# gets real amdgpu KMS instead of falling back to simpledrm. Without these,
+# amdgpu never binds to card0, EGL device enumeration fails, and Hyprland
+# deadlocks in libhyprgraphics async asset loading on session start.
+# The /imac20-hwaccel EFI entry keeps its extra debug flags
+# (loglevel=7, ignore_loglevel, etc.) for diagnostic boots.
+KERNEL_CMDLINE[default]+=" amdgpu.modeset=1 video=efifb:off"

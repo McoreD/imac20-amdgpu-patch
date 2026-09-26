@@ -1,0 +1,3 @@
+# Keep the kernel source tree and build artifacts OUT of git.
+src/6001-*   # tracked separately as a copy
+artifacts/amdgpu.ko*
