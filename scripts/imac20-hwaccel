@@ -3,13 +3,23 @@
 #
 #   Limine "Omarchy > linux-t2" (+ snapshots)  SAFE:  nomodeset modprobe.blacklist=amdgpu
 #   Limine "imac20-hwaccel" (default)          HWA:   amdgpu.modeset=1 video=efifb:off
-#                                                     + patched amdgpu (t2linux 6001 SMU fix)
+#                                                     + rebuilt amdgpu with the deferred-UCLK SMU fix
+#                                                     (PATCH_AMDGPU=1, default) or the linux-t2
+#                                                     package amdgpu (PATCH_AMDGPU=0)
+#
+# Why a rebuild: the package amdgpu carries t2linux 6001, which asks the SMU to
+# enable UCLK DPM inside EnableAllSmuFeatures. On the 5300 (106b:0219) that
+# times out intermittently ("SMU: No response msg_reg: 6", hw_init <smu> -62),
+# leaving a black panel. The deferred-UCLK patch (Atharva Tiwari, t2linux/wiki#743)
+# leaves UCLK out at init and enables it in smu_late_init. It replaces 6001.
 #
 # Commands (run with sudo):
 #   status              show boot mode, patch state per kernel, UKIs and entries
 #   repatch [KREL]      build + install the patched amdgpu for KREL (default: newest
 #                       installed linux-t2), then rebuild both UKIs
 #   rebuild-uki         rebuild the safe and hwaccel UKIs for the installed kernel
+#   unpatch             remove the patched amdgpu (updates/) and rebuild both UKIs
+#                       with the package module; set PATCH_AMDGPU=0 to keep it that way
 #   disable             remove the hwaccel boot entry (safe entry only)
 #   ab-test / ab-result / ab-clean
 #                       add a non-default entry that boots the HWA flags with the
@@ -24,10 +34,15 @@ shopt -s nullglob
 CONF=/etc/imac20-hwaccel.conf
 BUILD_USER=mike
 BUILD_ROOT=/home/mike/build
+# 1 = build + use amdgpu with the deferred-UCLK fix. 0 = use the linux-t2
+# package amdgpu (6001 only; SMU init fails intermittently, t2linux/wiki#743).
+PATCH_AMDGPU=1
 [[ -f $CONF ]] && source "$CONF"
 
 SHARE=/usr/local/share/imac20-hwaccel
-PATCH_FILE=$SHARE/6001-drm-amd-pm-Fix-boot-problems-in-5300.patch
+PATCH_FILE=$SHARE/amdgpu-defer-uclk-5300.patch
+# 6001 is reverted from the source tree before PATCH_FILE is applied.
+T2_6001=$SHARE/6001-drm-amd-pm-Fix-boot-problems-in-5300.patch
 STATE_DIR=/var/lib/imac20-hwaccel
 GPU_DROPIN=/etc/limine-entry-tool.d/imac20-gpu-mode.conf
 LIMINE_CONF=/boot/limine.conf
@@ -35,7 +50,7 @@ UKI_DIR=/boot/EFI/Linux
 DEFAULT_UKI=$UKI_DIR/omarchy_linux-t2.efi
 HWA_UKI=$UKI_DIR/omarchy_linux-t2-hwaccel.efi
 ENTRY_NAME=imac20-hwaccel
-ENTRY_ID=default-imac20-hwaccel
+ENTRY_ID=imac20-hwaccel
 SAFE_FLAGS="nomodeset modprobe.blacklist=amdgpu"
 HWA_FLAGS="amdgpu.modeset=1 video=efifb:off"
 
@@ -67,12 +82,16 @@ p = sys.argv[1]
 if p.endswith('.zst'):   d = subprocess.run(['zstd', '-dcq', p], capture_output=True, check=True).stdout
 elif p.endswith('.xz'):  d = subprocess.run(['xz', '-dc', p], capture_output=True, check=True).stdout
 else:                    d = open(p, 'rb').read()
-sys.exit(0 if bytes.fromhex('bbafc9ab') in d and bytes.fromhex('42fdffff') in d else 1)
+# Deferred-UCLK fix compiled in, 6001's hardcoded LOW mask compiled out.
+sys.exit(0 if b'Unable to apply late quirks' in d and bytes.fromhex('bbafc9ab') not in d else 1)
 PY
 }
 
 module_path() { modinfo -k "$1" -n amdgpu 2>/dev/null || true; }
-module_is_patched() { local m; m=$(module_path "$1"); [[ -n $m ]] && has_magic "$m"; }
+module_is_patched() { local m; m=$(module_path "$1"); [[ $m == */updates/* ]] && has_magic "$m"; }
+# "package module" means depmod resolves amdgpu to the linux-t2 package's own
+# file under kernel/.
+module_is_package() { [[ "$(module_path "$1")" == */kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko* ]] && pacman -Qoq "$(module_path "$1")" >/dev/null 2>&1; }
 
 build_module() { # <krel>
   local krel=$1 base localver tarver major src out
@@ -83,7 +102,7 @@ build_module() { # <krel>
   src=$BUILD_ROOT/linux-$tarver
   out=$BUILD_ROOT/amdgpu-$krel.ko.zst
 
-  [[ -f $PATCH_FILE ]] || die "patch missing: $PATCH_FILE"
+  [[ -f $PATCH_FILE && -f $T2_6001 ]] || die "patch missing: $PATCH_FILE or $T2_6001"
   [[ -f /usr/lib/modules/$krel/build/.config ]] || die "linux-t2-headers for $krel not installed"
 
   if [[ ! -f $src/Makefile ]]; then
@@ -98,13 +117,16 @@ build_module() { # <krel>
   # Older versions of this tooling built as root; take the tree back.
   find "$src" ! -user "$BUILD_USER" -exec chown "$BUILD_USER": {} +
   as_builder bash -euo pipefail -c '
-    cd "$1"; krel=$2; localver=$3; patchf=$4; out=$5
+    cd "$1"; krel=$2; localver=$3; patchf=$4; out=$5; t2_6001=$6
+    if patch -p1 -R --dry-run -s -f < "$t2_6001" >/dev/null 2>&1; then
+      echo "  reverting 6001 (replaced by the deferred-UCLK fix)"; patch -p1 -R -s < "$t2_6001"
+    fi
     if patch -p1 -R --dry-run -s -f < "$patchf" >/dev/null 2>&1; then
-      echo "  6001 patch already applied"
+      echo "  deferred-UCLK patch already applied"
     elif patch -p1 --dry-run -s -f < "$patchf" >/dev/null 2>&1; then
-      echo "  applying 6001 patch"; patch -p1 -s < "$patchf"
+      echo "  applying deferred-UCLK patch"; patch -p1 -s < "$patchf"
     else
-      echo "  6001 patch does not apply to this kernel source" >&2; exit 3
+      echo "  deferred-UCLK patch does not apply to this kernel source" >&2; exit 3
     fi
     cp "/usr/lib/modules/$krel/build/.config" .config
     cp "/usr/lib/modules/$krel/build/Module.symvers" Module.symvers
@@ -118,12 +140,12 @@ build_module() { # <krel>
     make -s -j"$(nproc)" M=drivers/gpu/drm/amd/amdgpu modules
     strip --strip-debug drivers/gpu/drm/amd/amdgpu/amdgpu.ko
     zstd -T0 -q -f -o "$out" drivers/gpu/drm/amd/amdgpu/amdgpu.ko
-  ' _ "$src" "$krel" "$localver" "$PATCH_FILE" "$out"
+  ' _ "$src" "$krel" "$localver" "$PATCH_FILE" "$out" "$T2_6001"
 
   local vm
   vm=$(modinfo -F vermagic "$out")
   [[ $vm == "$krel "* ]] || die "vermagic mismatch: '$vm' vs $krel"
-  has_magic "$out" || die "6001 magic constants missing from built module"
+  has_magic "$out" || die "built module lacks the deferred-UCLK fix (or still has 6001)"
 
   # updates/ wins over kernel/ (depmod search order) and is not owned by the
   # linux-t2 package, so pacman never flags or silently replaces it.
@@ -144,8 +166,14 @@ EOF
 }
 
 rebuild_ukis() {
-  local krel=$1
-  module_is_patched "$krel" || die "amdgpu for $krel is not patched; run: imac20-hwaccel repatch"
+  local krel=$1 desc
+  if [[ $PATCH_AMDGPU == 1 ]]; then
+    module_is_patched "$krel" || die "amdgpu for $krel is not patched; run: imac20-hwaccel repatch"
+    desc="deferred-UCLK amdgpu"
+  else
+    module_is_package "$krel" || die "amdgpu for $krel is not the package module ($(module_path "$krel")); run: imac20-hwaccel unpatch"
+    desc="package amdgpu"
+  fi
   mkdir -p "$STATE_DIR"
 
   trap 'write_dropin safe' EXIT
@@ -162,7 +190,7 @@ rebuild_ukis() {
   uki_cmdline "$DEFAULT_UKI" | grep -q 'nomodeset' || die "safe cmdline not in default UKI"
 
   limine-entry-tool --add-efi "$ENTRY_NAME" "$HWA_UKI" --overwrite \
-    --comment "Hardware acceleration (patched amdgpu, $krel). Black screen? Boot 'Omarchy' = safe mode." >/dev/null
+    --comment "Hardware acceleration ($desc, $krel). Black screen? Boot 'Omarchy' = safe mode." >/dev/null
   if grep -q '^#\?default_entry:' "$LIMINE_CONF"; then
     sed -i "s|^#\?default_entry:.*|default_entry: $ENTRY_ID|" "$LIMINE_CONF"
   else
@@ -230,6 +258,18 @@ ab_result() {
   journalctl -k -b --no-pager | grep -E 'SMU is initialized|smu.*failed|failed -62|Initialized amdgpu' || echo "no amdgpu init lines"
 }
 
+unpatch_module() { # <krel>
+  local krel=$1
+  if [[ -e /usr/lib/modules/$krel/updates/amdgpu.ko.zst ]]; then
+    rm -f "/usr/lib/modules/$krel/updates/amdgpu.ko.zst"
+    rmdir --ignore-fail-on-non-empty "/usr/lib/modules/$krel/updates"
+    depmod -a "$krel"
+    log "removed patched amdgpu from updates/ for $krel"
+  fi
+  module_is_package "$krel" || die "amdgpu for $krel does not resolve to the package module ($(module_path "$krel"))"
+  log "amdgpu for $krel: package module $(module_path "$krel")"
+}
+
 ab_clean() {
   limine-entry-tool --remove-efi-path "$AB_UKI" >/dev/null 2>&1 || rm -f "$AB_UKI"
   log "A/B test entry removed"
@@ -254,7 +294,7 @@ status() {
   for k in /usr/lib/modules/*/; do
     k=$(basename "$k")
     [[ -f /usr/lib/modules/$k/vmlinuz ]] || continue
-    printf 'amdgpu %-34s %s  %s\n' "$k" "$(module_is_patched "$k" && echo PATCHED || echo stock)" "$(module_path "$k")"
+    printf 'amdgpu %-34s %s  %s\n' "$k" "$(module_is_package "$k" && echo package || echo REBUILT)" "$(module_path "$k")"
   done
   echo "target krel: $krel"
   for u in "$DEFAULT_UKI" "$HWA_UKI"; do
@@ -270,11 +310,15 @@ case $cmd in
   status)      require_root "$@"; status ;;
   repatch)     require_root "$@"; k=${2:-$(target_krel)}; build_module "$k"; rebuild_ukis "$k" ;;
   rebuild-uki) require_root "$@"; rebuild_ukis "$(target_krel)" ;;
+  unpatch)     require_root "$@"; PATCH_AMDGPU=0; k=$(target_krel); unpatch_module "$k"; rebuild_ukis "$k" ;;
   disable)     require_root "$@"; disable_hwaccel manual ;;
   ab-test)     require_root "$@"; ab_test ;;
   ab-result)   require_root "$@"; ab_result ;;
   ab-clean)    require_root "$@"; ab_clean ;;
-  _hookwork)   k=$(target_krel); module_is_patched "$k" || build_module "$k"; rebuild_ukis "$k" ;;
+  _hookwork)   k=$(target_krel)
+               if [[ $PATCH_AMDGPU == 1 ]]; then module_is_patched "$k" || build_module "$k"
+               else unpatch_module "$k"; fi
+               rebuild_ukis "$k" ;;
   hook)
     # Run the work in a child so `set -e` stays active (it is suppressed
     # inside an `if` condition), and never fail the pacman transaction.
@@ -286,7 +330,7 @@ case $cmd in
       cat <<EOF
 
   ==================================================================
-  imac20-hwaccel: could NOT re-apply the amdgpu patch for $k.
+  imac20-hwaccel: could NOT prepare amdgpu / UKIs for $k.
   The hardware-acceleration boot entry has been REMOVED; the next boot
   uses the safe entry (no amdgpu). To retry: sudo imac20-hwaccel repatch
   ==================================================================

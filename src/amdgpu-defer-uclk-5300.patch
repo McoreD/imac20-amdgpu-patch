@@ -1,0 +1,84 @@
+From 8a3eecc41957a36e22b22a683c593442880b5daa Mon Sep 17 00:00:00 2001
+From: Atharva Tiwari <atharvatiwarilinuxdev@gmail.com>
+Date: Wed, 19 Aug 2026 15:47:56 -0400
+Subject: [PATCH] amdgpu: fix smu problem
+
+Signed-off-by: Atharva Tiwari <atharvatiwarilinuxdev@gmail.com>
+---
+ drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c     | 35 +++++++++++++++++++
+ .../gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c   |  6 +++-
+ 2 files changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c b/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
+index 3969a7670..cfea667b5 100644
+--- a/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
+@@ -905,6 +905,35 @@ static int smu_apply_default_config_table_settings(struct smu_context *smu)
+ 	return smu_set_config_table(smu, &adev->pm.config_table);
+ }
+ 
++static int smu_apply_late_quirks(struct smu_context *smu)
++{
++	struct pci_dev *pdev = smu->adev->pdev;
++	int ret = 0;
++
++	if (pdev->device == 0x7340 &&
++		pdev->subsystem_vendor == PCI_VENDOR_ID_APPLE &&
++		pdev->subsystem_device == 0x0219)
++	{
++		uint32_t features[2];
++		struct smu_feature_bits feature_mask;
++		uint64_t mask;
++
++		ret = smu_feature_get_enabled_mask(smu, &feature_mask);
++		if (ret)
++			return ret;
++
++		smu_feature_bits_to_arr32(&feature_mask, features, 64);
++		features[0] |= BIT(3);
++		mask = ((uint64_t)features[1] << 32) | features[0];
++
++		ret = smu_set_pp_feature_mask(smu, mask);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
+ static int smu_late_init(struct amdgpu_ip_block *ip_block)
+ {
+ 	struct amdgpu_device *adev = ip_block->adev;
+@@ -977,6 +1006,12 @@ static int smu_late_init(struct amdgpu_ip_block *ip_block)
+ 
+ 	smu_restore_dpm_user_profile(smu);
+ 
++	ret = smu_apply_late_quirks(smu);
++	if (ret) {
++		dev_err(adev->dev, "Unable to apply late quirks\n");
++		return ret;
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c b/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c
+index 6dfc3b585..75180572c 100644
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c
+@@ -349,7 +349,11 @@ navi10_init_allowed_features(struct smu_context *smu)
+ 	      (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(11, 0, 0)) &&
+ 	      (adev->rev_id == 0)) &&
+ 	    (adev->pm.pp_feature & PP_MCLK_DPM_MASK)) {
+-		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_UCLK_BIT);
++		if (!(adev->pdev->device == 0x7340 &&
++				adev->pdev->subsystem_vendor == PCI_VENDOR_ID_APPLE &&
++				adev->pdev->subsystem_device == 0x0219))
++			smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_UCLK_BIT);
++
+ 		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_MEM_VDDCI_SCALING_BIT);
+ 		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_MEM_MVDD_SCALING_BIT);
+ 	}
+-- 
+2.43.0
+
