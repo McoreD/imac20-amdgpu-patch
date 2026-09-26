@@ -133,6 +133,18 @@ modinfo -F vermagic drivers/gpu/drm/amd/amdgpu/amdgpu.ko
 - Crash triage order: `~/.cache/hyprland/hyprlandCrashReport<pid>.txt` (it has a log tail) → `journalctl --user -u wayland-wm@hyprland.desktop` → `coredumpctl info <pid>`.
   A `CAsyncResourceGatherer::asyncAssetSpinLock` thread in `pthread_cond_clockwait` is normal idle and not a deadlock.
 
+- `~/.config/hypr/hyprland.lua` is the **stock Omarchy template** (`require("default.hypr.omarchy")` + personal files). The earlier "Option A" config that skipped Omarchy defaults came from the false deadlock theory; don't bring it back. Validate changes with `Hyprland --verify-config -c ~/.config/hypr/hyprland.lua` and `hyprctl configerrors`.
+
+## 6. Open question: is the rebuild still needed?
+The linux-t2 package applies 6001 itself (verified: stock 7.2.6.arch2-1/-4 modules carry `0xABC9AFBB`). But stock 7.2.4-arch1-3 still failed SMU init (`-62`) on this iMac, and every successful init so far used the rebuilt module (vanilla source + 6001). A/B test without touching the module tree:
+```bash
+sudo imac20-hwaccel ab-test     # adds non-default entry 'imac20-hwaccel-stock' (package amdgpu overlaid in initramfs)
+# reboot, pick imac20-hwaccel-stock in Limine (black panel = answer is "rebuild needed"; power-cycle, boot default)
+sudo imac20-hwaccel ab-result   # which module booted (srcversion vs package) + SMU init lines
+sudo imac20-hwaccel ab-clean
+```
+If the package module initializes the SMU, the rebuild can be retired and hwaccel becomes a boot-entry-only change.
+
 Quick health check in hwaccel mode:
 ```bash
 sudo imac20-hwaccel status
