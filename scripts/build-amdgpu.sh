@@ -26,7 +26,7 @@ else
 fi
 
 echo "== ensuring CONFIG_LOCALVERSION matches =="
-sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION="-arch2-Watanare-T2-1-t2"|' .config
+sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION="-arch2-Watanare-T2-4-t2"|' .config
 grep -q '^CONFIG_LOCALVERSION_AUTO=y' .config && \
   sed -i 's|^CONFIG_LOCALVERSION_AUTO=y|# CONFIG_LOCALVERSION_AUTO is not set|' .config
 

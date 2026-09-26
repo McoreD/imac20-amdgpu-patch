@@ -5,7 +5,7 @@
 A small repo that holds one upstream patch (verbatim from
 `t2linux/linux-t2-patches`) plus five shell scripts that turn it into a
 working `amdgpu.ko.zst` for an Apple iMac20,1 / iMac20,2 running
-`linux-t2 7.2.6.arch2-1` (Watanare build). The scripts assume:
+`linux-t2 7.2.6.arch2-4` (Watanare build). The scripts assume:
 
 - `/home/mike/build/linux-7.2.6/` is a built (but not necessarily
   installed) Linux 7.2.6 source tree with `.config` from
@@ -37,8 +37,8 @@ If you change anything, preserve these:
    `strings | grep` — those bytes are non-printable ASCII). If the check
    fails, abort; do not install.
 2. **Vermagic must match the running kernel.** Required:
-   `7.2.6-arch2-Watanare-T2-1-t2 SMP preempt mod_unload`. Set
-   `CONFIG_LOCALVERSION="-arch2-Watanare-T2-1-t2"` in `.config` and
+   `7.2.6-arch2-Watanare-T2-4-t2 SMP preempt mod_unload`. Set
+   `CONFIG_LOCALVERSION="-arch2-Watanare-T2-4-t2"` in `.config` and
    `CONFIG_LOCALVERSION_AUTO` disabled. After changing `CONFIG_LOCALVERSION`,
    run `make prepare0` to regenerate `include/config/kernel.release` before
    rebuilding.
@@ -61,7 +61,7 @@ Run after any change to scripts or build flow:
 ```bash
 # 1. Confirm vermagic
 modinfo -F vermagic /home/mike/build/linux-7.2.6/drivers/gpu/drm/amd/amdgpu/amdgpu.ko
-# must equal: 7.2.6-arch2-Watanare-T2-1-t2 SMP preempt mod_unload
+# must equal: 7.2.6-arch2-Watanare-T2-4-t2 SMP preempt mod_unload
 
 # 2. Confirm magic constants
 python3 -c "
