@@ -28,7 +28,9 @@ On the machine this repo was built on, the package module booted fine for a day,
 
 `amdgpu-defer-uclk-5300.patch` replaces 6001. It leaves UCLK out of the features enabled at init, then turns UCLK on in `smu_late_init` once the SMU is up.
 Init no longer races, and memory clocks still scale normally (turning UCLK off for good fixes the boot but leaves MCLK stuck at 0 MHz).
-It passed 10/10 boots on an iMac20,1 `106b:0219` and was sent to amd-gfx on 2026-09-15. Once `linux-t2` carries it, this repo can be retired.
+It passed 10/10 boots on an iMac20,1 `106b:0219` in wiki#743, and 3/3 so far on the machine this repo was built on (stock 6001 module: 2 failures in 4 boots).
+
+**Upstream status (2026-10-02):** Ed Schofield's v2 covering `0218`/`0219` was applied to `amd-staging-drm-next` on 2026-09-11 and reverted on 2026-09-16 at a developer's request. Atharva Tiwari thinks the root cause is display-core init ordering rather than UCLK, and his own patch went to amd-gfx on 2026-09-15. `linux-t2-patches` closed the downstream PRs (#60, #61) pending upstream. Test data and the request to carry a fix in `linux-t2`: [wiki#743 comment](https://github.com/t2linux/wiki/issues/743#issuecomment-5939929239). Once `linux-t2` carries a fix for `0219`, this repo can be retired.
 
 Only `amdgpu.ko` is rebuilt, from the vanilla kernel.org source for the running `linux-t2` release, using the `linux-t2-headers` `.config` and `Module.symvers`.
 It installs to `/usr/lib/modules/<krel>/updates/`, so the package's own module is never touched and pacman never complains.
