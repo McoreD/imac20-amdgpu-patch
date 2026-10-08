@@ -223,6 +223,11 @@ ab_test() {
     || die "package module vermagic mismatch"
 
   objcopy -O binary --only-section=.initrd "$HWA_UKI" "$work/initrd"
+  # The kernel only recognises an appended newc archive on a 4-byte boundary,
+  # and the initrd ends in a compressed segment of arbitrary length; without
+  # this it logs "Initramfs unpacking failed: invalid magic" and boots the
+  # base module instead. Zero bytes between segments are skipped.
+  head -c $(( (4 - $(stat -c %s "$work/initrd") % 4) % 4 )) /dev/zero >> "$work/initrd"
   (cd "$work/root" && find usr | LC_ALL=C sort | bsdcpio -o --format newc --quiet) >> "$work/initrd"
   # --update-section silently truncates a grown PE section; remove + re-add at
   # the same VMA instead (objcopy then grows SizeOfImage), and verify both.
