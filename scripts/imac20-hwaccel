@@ -24,6 +24,9 @@
 #   ab-test / ab-result / ab-clean
 #                       add a non-default entry that boots the HWA flags with the
 #                       linux-t2 PACKAGE amdgpu, report which module booted, remove it
+#   test-entry          build the optional non-default test entry (TEST_ENTRY_NAME /
+#                       TEST_ENTRY_PATCHES in the conf); the hook rebuilds it on upgrades
+#   test-entry-remove   remove the test entry
 #   hook                pacman PostTransaction entry point (never fails the transaction)
 #
 # If hwaccel ever breaks (black panel after a kernel upgrade, etc.): pick the
@@ -37,6 +40,14 @@ BUILD_ROOT=/home/mike/build
 # 1 = build + use amdgpu with the deferred-UCLK fix. 0 = use the linux-t2
 # package amdgpu (6001 only; SMU init fails intermittently, t2linux/wiki#743).
 PATCH_AMDGPU=1
+# Optional extra, NON-default Limine entry that boots the hwaccel UKI with an
+# amdgpu built from vanilla source + TEST_ENTRY_PATCHES, applied in order in
+# place of the deferred-UCLK patch (list 6001 too if the test needs it). The
+# pacman hook rebuilds it on every linux-t2 upgrade; a failed rebuild removes
+# only this entry, never the hwaccel one. The patches stay wherever the conf
+# points, so a patch that must not be redistributed never enters this repo.
+TEST_ENTRY_NAME=
+TEST_ENTRY_PATCHES=()
 [[ -f $CONF ]] && source "$CONF"
 
 SHARE=/usr/local/share/imac20-hwaccel
@@ -204,23 +215,19 @@ rebuild_ukis() {
 # Builds an extra entry from the hwaccel UKI with the package module overlaid
 # via an appended cpio (later initramfs archives overwrite earlier files).
 # Touches nothing but a new EFI file and its Limine entry.
-AB_UKI=$UKI_DIR/omarchy_linux-t2-hwaccel-stock.efi
-AB_NAME=imac20-hwaccel-stock
-ab_test() {
-  local krel pkgver pkg work
-  krel=$(target_krel)
-  pkgver=$(pacman -Q linux-t2 | cut -d' ' -f2)
-  pkg=/var/cache/pacman/pkg/linux-t2-$pkgver-x86_64.pkg.tar.zst
-  [[ -f $pkg ]] || die "package $pkg not in cache (pacman -Sw linux-t2)"
+# Copy the hwaccel UKI to <out_uki> with <amdgpu.ko.zst> overlaid in its
+# initramfs as an extra newc archive (later archives overwrite earlier files).
+overlay_uki() { # <amdgpu.ko.zst> <krel> <out_uki>
+  local mod=$1 krel=$2 out=$3 work
   [[ -f $HWA_UKI ]] || die "no hwaccel UKI; run repatch first"
-  [[ "$(uname -r)" == "$krel" ]] || die "reboot into $krel first"
-
-  work=$(mktemp -d); trap 'rm -rf "${work:?}"' RETURN
+  [[ "$(objcopy -O binary --only-section=.uname "$HWA_UKI" /dev/stdout | tr -d '\0')" == "$krel" ]] \
+    || die "hwaccel UKI is not built for $krel"
+  [[ "$(modinfo -F vermagic "$mod")" == "$krel "* ]] || die "overlay module vermagic mismatch for $krel"
+  # No RETURN trap: bash traps are global and would fire again on later
+  # function returns with $work unset.
+  work=$(mktemp -d)
   mkdir -p "$work/root/usr/lib/modules/$krel/updates"
-  bsdtar -xOf "$pkg" "usr/lib/modules/$krel/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst" \
-    > "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst"
-  [[ "$(modinfo -F vermagic "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst")" == "$krel "* ]] \
-    || die "package module vermagic mismatch"
+  install -m644 "$mod" "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst"
 
   objcopy -O binary --only-section=.initrd "$HWA_UKI" "$work/initrd"
   # The kernel only recognises an appended newc archive on a 4-byte boundary,
@@ -242,7 +249,29 @@ ab_test() {
   # The extracted section is padded to the PE file alignment; compare the payload only.
   cmp -s -n "$(stat -c %s "$work/initrd")" <(objcopy -O binary --only-section=.initrd "$work/test.efi" /dev/stdout) "$work/initrd" \
     || die "rebuilt UKI initrd mismatch"
-  install -m755 "$work/test.efi" "$AB_UKI"
+  install -m755 "$work/test.efi" "$out"
+  rm -rf "$work"
+}
+
+AB_UKI=$UKI_DIR/omarchy_linux-t2-hwaccel-stock.efi
+AB_NAME=imac20-hwaccel-stock
+ab_test() {
+  local krel pkgver pkg work
+  krel=$(target_krel)
+  pkgver=$(pacman -Q linux-t2 | cut -d' ' -f2)
+  pkg=/var/cache/pacman/pkg/linux-t2-$pkgver-x86_64.pkg.tar.zst
+  [[ -f $pkg ]] || die "package $pkg not in cache (pacman -Sw linux-t2)"
+  [[ -f $HWA_UKI ]] || die "no hwaccel UKI; run repatch first"
+  [[ "$(uname -r)" == "$krel" ]] || die "reboot into $krel first"
+
+  work=$(mktemp -d); trap 'rm -rf "${work:?}"' RETURN
+  mkdir -p "$work/root/usr/lib/modules/$krel/updates"
+  bsdtar -xOf "$pkg" "usr/lib/modules/$krel/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst" \
+    > "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst"
+  [[ "$(modinfo -F vermagic "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst")" == "$krel "* ]] \
+    || die "package module vermagic mismatch"
+
+  overlay_uki "$work/root/usr/lib/modules/$krel/updates/amdgpu.ko.zst" "$krel" "$AB_UKI"
   limine-entry-tool --add-efi "$AB_NAME" "$AB_UKI" --overwrite \
     --comment "A/B TEST: hwaccel flags + linux-t2 package amdgpu ($pkgver). Not default." >/dev/null
   log "test entry '$AB_NAME' added (default unchanged). Boot it once, then run: imac20-hwaccel ab-result"
@@ -288,6 +317,71 @@ disable_hwaccel() {
   log "hwaccel entry removed; only the safe entry remains"
 }
 
+TEST_UKI=$UKI_DIR/omarchy_linux-t2-${TEST_ENTRY_NAME#imac20-}.efi
+
+# Build amdgpu for <krel> from the same source tree with TEST_ENTRY_PATCHES in
+# place of the deferred-UCLK patch, then put the tree back as build_module
+# expects it (6001 reverted, deferred-UCLK applied), even if the build fails.
+build_test_module() { # <krel>
+  local krel=$1 base localver tarver src out p
+  base=${krel%%-*}; localver=${krel#"$base"}
+  tarver=$base; [[ $base == *.*.0 ]] && tarver=${base%.0}
+  src=$BUILD_ROOT/linux-$tarver
+  out=$BUILD_ROOT/amdgpu-$krel-$TEST_ENTRY_NAME.ko.zst
+  [[ -f $src/Makefile ]] || die "no source tree at $src; run repatch first"
+  (( ${#TEST_ENTRY_PATCHES[@]} )) || die "TEST_ENTRY_PATCHES is empty"
+  for p in "${TEST_ENTRY_PATCHES[@]}"; do [[ -f $p ]] || die "test patch missing: $p"; done
+
+  log "building $TEST_ENTRY_NAME amdgpu for $krel in $src"
+  find "$src" ! -user "$BUILD_USER" -exec chown "$BUILD_USER": {} +
+  as_builder bash -euo pipefail -c '
+    cd "$1"; krel=$2; localver=$3; out=$4; patchf=$5; t2_6001=$6; shift 6
+    applied=()
+    restore() {
+      local i
+      for (( i=${#applied[@]}-1; i>=0; i-- )); do patch -p1 -R -s < "${applied[i]}"; done
+      patch -p1 -R --dry-run -s -f < "$t2_6001" >/dev/null 2>&1 && patch -p1 -R -s < "$t2_6001"
+      patch -p1 -R --dry-run -s -f < "$patchf" >/dev/null 2>&1 || patch -p1 -s < "$patchf"
+    }
+    trap restore EXIT
+    patch -p1 -R --dry-run -s -f < "$patchf" >/dev/null 2>&1 && patch -p1 -R -s < "$patchf"
+    patch -p1 -R --dry-run -s -f < "$t2_6001" >/dev/null 2>&1 && patch -p1 -R -s < "$t2_6001"
+    for p in "$@"; do
+      patch -p1 --dry-run -s -f < "$p" >/dev/null 2>&1 || { echo "  $p does not apply to this kernel source" >&2; exit 3; }
+      patch -p1 -s < "$p"; applied+=("$p"); echo "  applied $(basename "$p")"
+    done
+    cp "/usr/lib/modules/$krel/build/.config" .config
+    cp "/usr/lib/modules/$krel/build/Module.symvers" Module.symvers
+    scripts/config --set-str LOCALVERSION "$localver" --disable LOCALVERSION_AUTO
+    rm -f localversion* .version include/config/kernel.release
+    make -s olddefconfig
+    make -s -j"$(nproc)" modules_prepare
+    [[ $(make -s kernelrelease) == "$krel" ]] || { echo "  kernelrelease mismatch" >&2; exit 4; }
+    rm -f drivers/gpu/drm/amd/amdgpu/amdgpu.ko
+    make -s -j"$(nproc)" M=drivers/gpu/drm/amd/amdgpu modules
+    strip --strip-debug -o "$out.ko" drivers/gpu/drm/amd/amdgpu/amdgpu.ko
+    zstd -T0 -q -f --rm -o "$out" "$out.ko"
+  ' _ "$src" "$krel" "$localver" "$out" "$PATCH_FILE" "$T2_6001" "${TEST_ENTRY_PATCHES[@]}"
+  [[ "$(modinfo -F vermagic "$out")" == "$krel "* ]] || die "test module vermagic mismatch"
+  TEST_MODULE=$out
+}
+
+build_test_entry() { # <krel>
+  local krel=$1
+  [[ -n $TEST_ENTRY_NAME ]] || die "TEST_ENTRY_NAME is not set in $CONF"
+  build_test_module "$krel"
+  overlay_uki "$TEST_MODULE" "$krel" "$TEST_UKI"
+  limine-entry-tool --add-efi "$TEST_ENTRY_NAME" "$TEST_UKI" --overwrite \
+    --comment "TEST: hwaccel + amdgpu with $(basename -a "${TEST_ENTRY_PATCHES[@]}" | paste -sd' '), $krel. Not default." >/dev/null
+  log "test entry '$TEST_ENTRY_NAME' rebuilt for $krel (default unchanged)"
+}
+
+remove_test_entry() {
+  [[ -n $TEST_ENTRY_NAME ]] || return 0
+  limine-entry-tool --remove-efi-path "$TEST_UKI" >/dev/null 2>&1 || rm -f "$TEST_UKI"
+  log "test entry '$TEST_ENTRY_NAME' removed"
+}
+
 status() {
   local krel k
   krel=$(target_krel)
@@ -320,6 +414,9 @@ case $cmd in
   ab-test)     require_root "$@"; ab_test ;;
   ab-result)   require_root "$@"; ab_result ;;
   ab-clean)    require_root "$@"; ab_clean ;;
+  test-entry)  require_root "$@"; build_test_entry "$(target_krel)" ;;
+  test-entry-remove) require_root "$@"; remove_test_entry ;;
+  _testentry)  build_test_entry "$(target_krel)" ;;
   _hookwork)   k=$(target_krel)
                if [[ $PATCH_AMDGPU == 1 ]]; then module_is_patched "$k" || build_module "$k"
                else unpatch_module "$k"; fi
@@ -330,6 +427,12 @@ case $cmd in
     k=$(target_krel)
     if "$0" _hookwork; then
       log "hwaccel ready for $k"
+      # The optional test entry is separate: if it can't be rebuilt, drop just
+      # that entry so it can't boot a kernel whose modules are gone.
+      if [[ -n $TEST_ENTRY_NAME ]] && ! "$0" _testentry; then
+        remove_test_entry
+        log "WARNING: could not rebuild test entry '$TEST_ENTRY_NAME' for $k; removed it (hwaccel is fine)"
+      fi
     else
       disable_hwaccel "patch-failed-$k"
       cat <<EOF

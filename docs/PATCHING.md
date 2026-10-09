@@ -103,6 +103,17 @@ Install or reinstall everything from the repo: `sudo scripts/install.sh` (idempo
 
 ---
 
+### Optional test entry
+To try someone else's amdgpu patch without touching the hwaccel entry, set this in `/etc/imac20-hwaccel.conf`:
+```bash
+TEST_ENTRY_NAME=imac20-5k-test
+TEST_ENTRY_PATCHES=(/usr/local/share/imac20-hwaccel/6001-drm-amd-pm-Fix-boot-problems-in-5300.patch /path/to/their.patch)
+```
+`sudo imac20-hwaccel test-entry` builds amdgpu from the same vanilla tree with those patches applied in order, in place of the deferred-UCLK patch. It overlays that module into a copy of the hwaccel UKI and adds it as a non-default Limine entry.
+The pacman hook rebuilds it after each `linux-t2` upgrade. If that fails, the hook removes only the test entry; the hwaccel entry is never affected.
+The patches stay wherever the conf points, so a patch whose author hasn't allowed redistribution never enters this repo.
+Overlay detail: the UKI initrd ends in a compressed segment, so the appended archive is zero-padded to a 4-byte boundary. Without that, the kernel logs `Initramfs unpacking failed: invalid magic` and silently boots the base module.
+
 ## 4. Adapting to a new kernel (when `repatch` fails)
 
 Check `sudo imac20-hwaccel repatch` output for which step failed:
