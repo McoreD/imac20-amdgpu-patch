@@ -10,10 +10,13 @@
 # - sets PATCH_AMDGPU=1 and builds the deferred-UCLK amdgpu for the newest
 #   linux-t2, then both UKIs
 set -euo pipefail
-[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+source "$REPO/scripts/lib/hardware.sh"
+require_supported_gpu
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
 
 install -Dm755 "$REPO/scripts/imac20-hwaccel" /usr/local/sbin/imac20-hwaccel
+install -Dm644 "$REPO/scripts/lib/hardware.sh" /usr/local/share/imac20-hwaccel/hardware.sh
 for p in 6001-drm-amd-pm-Fix-boot-problems-in-5300.patch amdgpu-defer-uclk-5300.patch; do
   install -Dm644 "$REPO/src/$p" "/usr/local/share/imac20-hwaccel/$p"
 done

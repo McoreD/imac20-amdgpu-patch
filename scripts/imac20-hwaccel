@@ -405,6 +405,17 @@ status() {
 }
 
 cmd=${1:-status}
+# Guard module builds and accelerated-entry setup. Keep diagnostics and
+# recovery (including unpatch's package-module rebuild) available if hardware changes.
+case $cmd in
+  repatch|rebuild-uki|ab-test|test-entry|_testentry|_hookwork|hook)
+    if ! source "$SHARE/hardware.sh" || ! require_supported_gpu; then
+      # A pacman hook must not fail the transaction or rewrite another GPU's
+      # boot configuration, including the usual failure/disable handler.
+      [[ $cmd == hook ]] && exit 0
+      exit 1
+    fi ;;
+esac
 case $cmd in
   status)      require_root "$@"; status ;;
   repatch)     require_root "$@"; k=${2:-$(target_krel)}; build_module "$k"; rebuild_ukis "$k" ;;
