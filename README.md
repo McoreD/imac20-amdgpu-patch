@@ -1,6 +1,6 @@
 # imac20-amdgpu-patch
 
-> Reliable GPU acceleration for **Apple iMac20,1 / iMac20,2** (Radeon Pro 5300/5500, Navi 14) on Arch Linux / Omarchy with the `linux-t2` kernel.
+> Reliable GPU acceleration for **Apple iMac20,1 / iMac20,2 with Radeon Pro 5300** (Navi 14, `1002:7340`, subsystem `106b:0219`) on Arch Linux / Omarchy with the `linux-t2` kernel.
 > A rebuilt `amdgpu.ko` with the deferred-UCLK SMU fix, plus a two-entry Limine boot (hardware-accelerated / safe) that survives kernel upgrades.
 
 This repository is **not** a fork of the Linux kernel. It holds:
@@ -36,6 +36,15 @@ Only `amdgpu.ko` is rebuilt, from the vanilla kernel.org source for the running 
 It installs to `/usr/lib/modules/<krel>/updates/`, so the package's own module is never touched and pacman never complains.
 
 ## Install
+
+The installer checks PCI IDs before installing files or changing boot settings.
+The bundled patch targets `1002:7340` / `106b:0219`; the `106b:0218` variant
+requires a different patch and is rejected. The check uses sysfs, so a working
+graphics driver is not required. Rebuild and accelerated-entry commands repeat
+the check; an unsupported host's pacman hook exits successfully without changes.
+Diagnostics and cleanup commands remain available for recovery. On unsupported
+hardware, `unpatch` restores the package module, rebuilds the safe UKI and removes
+the default hardware-accelerated entry.
 
 ```bash
 git clone https://github.com/McoreD/imac20-amdgpu-patch.git

@@ -176,6 +176,13 @@ KERNEL_CMDLINE[default]+=" $flags"
 EOF
 }
 
+rebuild_safe_uki() {
+  log "building safe UKI"
+  write_dropin safe
+  limine-mkinitcpio >/dev/null
+  uki_cmdline "$DEFAULT_UKI" | grep -q 'nomodeset' || die "safe cmdline not in default UKI"
+}
+
 rebuild_ukis() {
   local krel=$1 desc
   if [[ $PATCH_AMDGPU == 1 ]]; then
@@ -194,11 +201,8 @@ rebuild_ukis() {
   uki_cmdline "$DEFAULT_UKI" | grep -q 'amdgpu.modeset=1' || die "hwaccel cmdline not in built UKI"
   cp "$DEFAULT_UKI" "$HWA_UKI.new" && mv "$HWA_UKI.new" "$HWA_UKI"
 
-  log "building safe UKI"
-  write_dropin safe
+  rebuild_safe_uki
   trap - EXIT
-  limine-mkinitcpio >/dev/null
-  uki_cmdline "$DEFAULT_UKI" | grep -q 'nomodeset' || die "safe cmdline not in default UKI"
 
   limine-entry-tool --add-efi "$ENTRY_NAME" "$HWA_UKI" --overwrite \
     --comment "Hardware acceleration ($desc, $krel). Black screen? Boot 'Omarchy' = safe mode." >/dev/null
@@ -405,11 +409,30 @@ status() {
 }
 
 cmd=${1:-status}
+# Guard module builds and accelerated-entry setup. Keep diagnostics and
+# recovery available if hardware changes.
+case $cmd in
+  repatch|rebuild-uki|ab-test|test-entry|_testentry|_hookwork|hook)
+    if ! source "$SHARE/hardware.sh" || ! require_supported_gpu; then
+      # A pacman hook must not fail the transaction or rewrite another GPU's
+      # boot configuration, including the usual failure/disable handler.
+      [[ $cmd == hook ]] && exit 0
+      exit 1
+    fi ;;
+esac
 case $cmd in
   status)      require_root "$@"; status ;;
   repatch)     require_root "$@"; k=${2:-$(target_krel)}; build_module "$k"; rebuild_ukis "$k" ;;
   rebuild-uki) require_root "$@"; rebuild_ukis "$(target_krel)" ;;
-  unpatch)     require_root "$@"; PATCH_AMDGPU=0; k=$(target_krel); unpatch_module "$k"; rebuild_ukis "$k" ;;
+  unpatch)     require_root "$@"; PATCH_AMDGPU=0; k=$(target_krel); unpatch_module "$k"
+               if source "$SHARE/hardware.sh" && require_supported_gpu; then
+                 rebuild_ukis "$k"
+               else
+                 # Recovery must not create or select an accelerated entry
+                 # for hardware outside the bundled patch's supported IDs.
+                 rebuild_safe_uki
+                 disable_hwaccel unsupported-gpu
+               fi ;;
   disable)     require_root "$@"; disable_hwaccel manual ;;
   ab-test)     require_root "$@"; ab_test ;;
   ab-result)   require_root "$@"; ab_result ;;
