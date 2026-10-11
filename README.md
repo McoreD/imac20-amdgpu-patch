@@ -42,7 +42,9 @@ The bundled patch targets `1002:7340` / `106b:0219`; the `106b:0218` variant
 requires a different patch and is rejected. The check uses sysfs, so a working
 graphics driver is not required. Rebuild and accelerated-entry commands repeat
 the check; an unsupported host's pacman hook exits successfully without changes.
-Diagnostics and cleanup commands remain available for recovery.
+Diagnostics and cleanup commands remain available for recovery. On unsupported
+hardware, `unpatch` restores the package module, rebuilds the safe UKI and removes
+the default hardware-accelerated entry.
 
 ```bash
 git clone https://github.com/McoreD/imac20-amdgpu-patch.git

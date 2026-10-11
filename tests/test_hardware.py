@@ -68,6 +68,9 @@ class HardwareTests(unittest.TestCase):
                      "remove_test_entry", "module_is_patched"):
             stubs += f'{name}() {{ echo "called:{name}"; }}\n'
         stubs += 'target_krel() { echo fixture-kernel; }\n'
+        stubs += 'write_dropin() { echo "called:write_dropin:$1"; }\n'
+        stubs += 'limine-mkinitcpio() { :; }\n'
+        stubs += 'uki_cmdline() { echo "nomodeset modprobe.blacklist=amdgpu"; }\n'
         script = prefix + stubs + "cmd=${1:-status}\n" + dispatch
         return subprocess.run(["bash", "-c", script, "_", command, str(self.root)],
                               capture_output=True, text=True)
@@ -98,6 +101,24 @@ class HardwareTests(unittest.TestCase):
             result = self.dispatch(command)
             self.assertEqual(result.returncode, 0, (command, result.stderr))
             self.assertIn("called:", result.stdout)
+
+    def test_unsupported_unpatch_rebuilds_safe_boot_without_acceleration(self):
+        self.gpu("0x0218")
+        result = self.dispatch("unpatch")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("called:unpatch_module", result.stdout)
+        self.assertIn("called:write_dropin:safe", result.stdout)
+        self.assertIn("called:disable_hwaccel", result.stdout)
+        self.assertNotIn("called:rebuild_ukis", result.stdout)
+        self.assertNotIn("called:write_dropin:hwaccel", result.stdout)
+
+    def test_supported_unpatch_preserves_package_module_boot(self):
+        self.gpu()
+        result = self.dispatch("unpatch")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("called:unpatch_module", result.stdout)
+        self.assertIn("called:rebuild_ukis", result.stdout)
+        self.assertNotIn("called:disable_hwaccel", result.stdout)
 
     def test_installer_rejects_before_privilege_or_writes(self):
         self.gpu("0x0218")
